@@ -1,0 +1,47 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: deploy-fbc
+spec:
+  params:
+    - name: SNAPSHOT
+      description: Snapshot of the application
+      type: string
+    - name: NAMESPACE
+      description: Namespace
+      type: string
+      default: ""
+  tasks:
+    - name: parse-metadata
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/integration-examples
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/test_metadata.yaml
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+    - name: provision-cluster-and-deploy-fbc
+      runAfter:
+        - parse-metadata
+      taskSpec:
+        steps:
+          - name: create-catalogsource-fbc
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/asergienk/tekton-integration-catalog
+                - name: revision
+                  value: CVP-4400
+                - name: pathInRepo
+                  value: stepactions/bundles/create-catalogsource-fbc/0.1/create-catalogsource-fbc.yaml
+            params:
+              - name: fbcFragment
+                value: "$(tasks.parse-metadata.results.component-container-image)"
+              - name: csNamespace
+                value: "test-cs-fbc"

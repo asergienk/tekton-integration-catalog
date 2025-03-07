@@ -1,0 +1,52 @@
+apiVersion: tekton.dev/v1beta1
+kind: StepAction
+metadata:
+  name: create-catalogsource-fbc
+spec:
+  description: |
+    This StepAction retrieves the supported architectures for a bundle by checking the "operatorframework.io/arch" labels on the bundle CSV.
+    If arm64 is supported, the StepAction returns it; otherwise, it returns amd64.
+    If neither arm64 nor amd64 are supported, the step exits with an error.
+  image: quay.io/konflux-ci/konflux-test:v1.4.19@sha256:6cecc96de443a5c6b3906091656cef504833797dfd2aa132d1eeabc5483b2fb9
+  params:
+    - name: fbcFragment
+      type: string
+      description: A FBC fragment image.
+    - name: csNamespace
+      type: string
+      description: Namespace where the CatalogSource is installed.
+  env:
+    - name: FBC_FRAGMENT
+      value: "$(params.fbcFragment)"
+    - name: CS_NAMESPACE
+      value: "$(params.csNamespace)"
+  script: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . /utils.sh
+
+    if [ -z "$FBC_FRAGMENT" ]; then
+      echo "Error: FBC_FRAGMENT parameter is required." >&2
+      exit 1
+    fi
+
+    CS_NAMESTANZA="generateName: oo-"
+
+    CS_MANIFEST=$(cat <<EOF
+    apiVersion: operators.coreos.com/v1alpha1
+    kind: CatalogSource
+    metadata:
+      $CS_NAMESTANZA
+      namespace: $CS_NAMESPACE
+    spec:
+      sourceType: grpc
+      image: "$FBC_FRAGMENT"
+    grpcPodConfig:
+      securityContextConfig: restricted
+    EOF
+    )
+
+    echo "Creating CatalogSource:"
+    echo "$CS_MANIFEST"
+    CATSRC=$(oc create -f - -o jsonpath='{.metadata.name}' <<< "${CS_MANIFEST}" )
+    echo "CatalogSource name is \"$CATSRC\""
