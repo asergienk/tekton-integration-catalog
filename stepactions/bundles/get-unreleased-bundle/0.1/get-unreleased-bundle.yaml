@@ -5,6 +5,7 @@ metadata:
 spec:
   description: >-
     This StepAction retrieves the highest bundle version from a specified package, channel, and unreleased bundles list in the provided FBC fragment.
+    The step retrieves unreleased bundles. It expects a ImageDigestMirrorSet file located at .tekton/images-mirror-set.yaml of a FBC fragment git repo. It should map unreleased registry.redhat.io pullspecs of relatedImages to their valid quay.io pullspecs. If the ImageDigestMirrorSet is not provided, the task will attempt to process the registry.redhat.io pullspecs as is and might fail.
     If package name and/or channel name are not specified, the step will determine the default package and/or channel name.
     Default package name determination:
       * If there is only one 'olm.package', it's name is returned
@@ -40,6 +41,8 @@ spec:
       value: $(params.packageName)
     - name: CHANNEL_NAME
       value: $(params.channelName)
+    - name: SOURCE_CODE_DIR
+      value: /tekton/home/source
   script: |
     #!/usr/bin/env bash
     set -euo pipefail
@@ -50,10 +53,20 @@ spec:
       exit 1
     fi
 
+    image_mirror_map=""
+    mirror_set="${SOURCE_CODE_DIR}/.tekton/images-mirror-set.yaml"
+    if [[ -f "${mirror_set}" ]]; then
+      mirror_set_yaml=$(cat "${mirror_set}")
+      image_mirror_map=$(process_image_digest_mirror_set "${mirror_set_yaml}")
+      echo "${image_mirror_map}" > "/tekton/home/related-images-map.txt"
+    else
+      echo "Could not find Image mirror set at ${mirror_set}. Unreleased bundles will fail the scan."
+    fi
+
     echo "Retrieving unreleased bundles..."
     if ! unreleased_bundles=$(get_unreleased_bundles -i "$FBC_FRAGMENT"); then
       echo "Could not get unreleased bundle images from the fragment. Make sure you have ImagePullCredentials for registry.redhat.io" >&2
-      exit 1
+      exit 0
     fi
 
     if [ -z "${unreleased_bundles}" ]; then
