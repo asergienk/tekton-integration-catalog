@@ -54,7 +54,8 @@ spec:
       echo "OCP version '$ocp_version' is in the cluster supported versions list."
     else
       echo "OCP version '$ocp_version' is NOT in the list of cluster supported versions: ${CLUSTER_VERSIONS[*]}" >&2
-      exit 1
+      echo -n "" > "$(step.results.ocpVersion.path)"
+      exit 0
     fi
   args:
     - "$(params.fbcFragment)"
