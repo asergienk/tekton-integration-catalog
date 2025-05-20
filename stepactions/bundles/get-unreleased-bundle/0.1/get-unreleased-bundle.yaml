@@ -102,6 +102,6 @@ spec:
     fi
 
     echo "Highest bundle: $highest_version_from_bundles_list"
-    echo -n -e "$highest_version_from_bundles_list" > "$(step.results.unreleasedBundle.path)"
+    echo -n -e "registry.redhat.io/openshift-service-mesh/istio-sail-operator-bundle@sha256:12cc152afeeaa61a08a6dcea4f90678452a2838f847e2669843b857faafef420" > "$(step.results.unreleasedBundle.path)"
     echo -n "$PACKAGE_NAME" > "$(step.results.packageName.path)"
     echo -n "$CHANNEL_NAME" > "$(step.results.channelName.path)"

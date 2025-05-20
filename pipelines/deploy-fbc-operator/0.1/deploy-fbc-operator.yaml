@@ -80,10 +80,6 @@ spec:
     - name: provision-eaas-space
       runAfter:
         - parse-metadata
-      when:
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       taskRef:
         resolver: git
         params:
@@ -98,46 +94,15 @@ spec:
           value: $(context.pipelineRun.name)
         - name: ownerUid
           value: $(context.pipelineRun.uid)
-    - name: get-unreleased-bundle
+    - name: fetch-image-mirror-set
       runAfter:
         - provision-eaas-space
-      when:
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       taskSpec:
         results:
-          - name: unreleasedBundle
-            description: "Unreleased bundle image (may be mirrored)"
-          - name: packageName
-            value: "$(steps.get-unreleased-bundle.results.packageName)"
-          - name: channelName
-            value: "$(steps.get-unreleased-bundle.results.channelName)"
+          - name: mirrorSetYaml
+            description: "Contents of the image mirror set yaml file"
         steps:
-          - name: get-unreleased-bundle
-            computeResources:
-              limits:
-                memory: 4Gi
-              requests:
-                memory: 4Gi
-                cpu: 500m
-            ref:
-              resolver: git
-              params:
-                - name: url
-                  value: https://github.com/konflux-ci/tekton-integration-catalog.git
-                - name: revision
-                  value: main
-                - name: pathInRepo
-                  value: stepactions/bundles/get-unreleased-bundle/0.1/get-unreleased-bundle.yaml
-            params:
-              - name: fbcFragment
-                value: "$(tasks.parse-metadata.results.component-container-image)"
-              - name: packageName
-                value: $(params.PACKAGE_NAME)
-              - name: channelName
-                value: $(params.CHANNEL_NAME)
-          - name: process-image-mirror-set
+          - name: retrieve-mirror-yaml
             image: quay.io/konflux-ci/konflux-test:v1.4.21@sha256:ddce6bc954694b55808507c1f92dfe9d094d52c636c8154c3fee441faff19f90
             computeResources:
               limits:
@@ -146,8 +111,6 @@ spec:
                 memory: 512Mi
                 cpu: 100m
             env:
-              - name: BUNDLE_IMAGE
-                value: "$(steps.get-unreleased-bundle.results.unreleasedBundle)"
               - name: SOURCE_GIT_URL
                 value: "$(tasks.parse-metadata.results.source-git-url)"
               - name: SOURCE_GIT_REVISION
@@ -160,22 +123,6 @@ spec:
               #!/usr/bin/env bash
               set -euo pipefail
               . /utils.sh
-
-              replaced_image=""
-
-              if [[ -z "${BUNDLE_IMAGE}" || "${BUNDLE_IMAGE}" == "null" ]]; then
-                echo "Unreleased bundle was not found. Cannot proceed with mirror substitution."
-                echo -n "$replaced_image" > "$(results.unreleasedBundle.path)"
-                exit 0
-              fi
-
-              # Check if the bundle image is pullable before anything else
-              if skopeo inspect --no-tags --config "docker://${BUNDLE_IMAGE}" > /dev/null 2>&1; then
-                echo "Bundle image $BUNDLE_IMAGE is pullable. Using as-is, without applying mirror substitution."
-                echo -n "$BUNDLE_IMAGE" > "$(results.unreleasedBundle.path)"
-                exit 0
-              fi
-              echo "Could not inspect original pullspec $BUNDLE_IMAGE. Checking if there's a mirror present"
               
               # Fetch and process mirror set
               mirror_set_url="${SOURCE_GIT_URL}/raw/${SOURCE_GIT_REVISION}/.tekton/images-mirror-set.yaml"
@@ -207,12 +154,84 @@ spec:
                 mirror_set_yaml=$(curl -kfL "$mirror_set_url")
               fi
 
-              if [[ $? -eq 0 && -n "$mirror_set_yaml" ]]; then
-                process_image_digest_mirror_set "$mirror_set_yaml" > /tekton/home/mirror-map.txt
-              else
-                echo "Could not fetch image mirror set at ${mirror_set_url}. Unreleased bundles will fail opm render."
+              echo "Image mirror set yaml is: \n$mirror_set_yaml"
+
+              if [[ $? -ne 0 || -z "$mirror_set_yaml" ]]; then
+                echo "Could not fetch image mirror set at ${mirror_set_url}."
                 exit 1
               fi
+
+              echo -n "$mirror_set_yaml" > "$(results.mirrorSetYaml.path)"
+    - name: get-unreleased-bundle
+      runAfter:
+        - fetch-image-mirror-set
+      taskSpec:
+        results:
+          - name: unreleasedBundle
+            description: "Unreleased bundle image (may be mirrored)"
+          - name: packageName
+            value: "$(steps.get-unreleased-bundle.results.packageName)"
+          - name: channelName
+            value: "$(steps.get-unreleased-bundle.results.channelName)"
+        steps:
+          - name: get-unreleased-bundle
+            computeResources:
+              limits:
+                memory: 4Gi
+              requests:
+                memory: 4Gi
+                cpu: 500m
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/asergienk/tekton-integration-catalog.git
+                - name: revision
+                  value: investigate_deploy
+                - name: pathInRepo
+                  value: stepactions/bundles/get-unreleased-bundle/0.1/get-unreleased-bundle.yaml
+            params:
+              - name: fbcFragment
+                value: "$(tasks.parse-metadata.results.component-container-image)"
+              - name: packageName
+                value: $(params.PACKAGE_NAME)
+              - name: channelName
+                value: $(params.CHANNEL_NAME)
+          - name: process-image-mirror-set
+            image: quay.io/konflux-ci/konflux-test:v1.4.21@sha256:ddce6bc954694b55808507c1f92dfe9d094d52c636c8154c3fee441faff19f90
+            computeResources:
+              limits:
+                memory: 512Mi
+              requests:
+                memory: 512Mi
+                cpu: 100m
+            env:
+              - name: BUNDLE_IMAGE
+                value: "$(steps.get-unreleased-bundle.results.unreleasedBundle)"
+              - name: MIRROR_SET_YAML
+                value: "$(tasks.fetch-image-mirror-set.results.mirrorSetYaml)"
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              . /utils.sh
+
+              replaced_image=""
+
+              if [[ -z "${BUNDLE_IMAGE}" || "${BUNDLE_IMAGE}" == "null" ]]; then
+                echo "Unreleased bundle was not found. Cannot proceed with mirror substitution."
+                echo -n "$replaced_image" > "$(results.unreleasedBundle.path)"
+                exit 0
+              fi
+
+              # Check if the bundle image is pullable before anything else
+              if skopeo inspect --no-tags --config "docker://${BUNDLE_IMAGE}" > /dev/null 2>&1; then
+                echo "Bundle image $BUNDLE_IMAGE is pullable. Using as-is, without applying mirror substitution."
+                echo -n "$BUNDLE_IMAGE" > "$(results.unreleasedBundle.path)"
+                exit 0
+              fi
+              echo "Could not inspect original pullspec $BUNDLE_IMAGE. Checking if there's a mirror present"
+
+              process_image_digest_mirror_set "$MIRROR_SET_YAML" > /tekton/home/mirror-map.txt
 
               # Check and apply mirror mapping
               if [ -s /tekton/home/mirror-map.txt ]; then
@@ -269,9 +288,6 @@ spec:
         - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
           operator: notin
           values: [""]
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       taskSpec:
         results:
           - name: ocpVersion
@@ -333,11 +349,10 @@ spec:
         - input: "$(tasks.pick-cluster-params.results.bundleArch)"
           operator: notin
           values: [""]
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       taskSpec:
         results:
+          - name: extractedMirrorSet
+            description: "Extracted imageDigestMirrors yaml"
           - name: clusterName
             value: "$(steps.create-cluster.results.clusterName)"
         steps:
@@ -354,6 +369,20 @@ spec:
             params:
               - name: prefix
                 value: "$(tasks.pick-cluster-params.results.ocpVersion)"
+          - name: extract-mirrors
+            image: quay.io/konflux-ci/konflux-test:v1.4.21@sha256:ddce6bc954694b55808507c1f92dfe9d094d52c636c8154c3fee441faff19f90
+            env:
+              - name: MIRROR_SET_YAML
+                value: "$(tasks.fetch-image-mirror-set.results.mirrorSetYaml)"
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "debug: $MIRROR_SET_YAML"
+              
+              escaped="- mirrors:\n    - quay.io/redhat-user-workloads/service-mesh-tenant/ossm-3-0-cni\n  source: registry.redhat.io/openshift-service-mesh/istio-cni-rhel9\n- mirrors:\n    - quay.io/redhat-user-workloads/service-mesh-tenant/ossm-3-0-must-gather\n  source: registry.redhat.io/openshift-service-mesh/istio-must-gather-rhel9\n- mirrors:\n    - quay.io/redhat-user-workloads/service-mesh-tenant/ossm-3-0-pilot\n  source: registry.redhat.io/openshift-service-mesh/istio-pilot-rhel9\n- mirrors:\n    - quay.io/redhat-user-workloads/service-mesh-tenant/ossm-3-0-proxy\n  source: registry.redhat.io/openshift-service-mesh/istio-proxyv2-rhel9\n- mirrors:\n    - quay.io/redhat-user-workloads/service-mesh-tenant/ossm-3-0-operator\n  source: registry.redhat.io/openshift-service-mesh/istio-rhel9-operator\n- mirrors:\n    - quay.io/redhat-user-workloads/service-mesh-tenant/ossm-3-0-bundle\n  source: registry.redhat.io/openshift-service-mesh/istio-sail-operator-bundle"
+
+              # Save to Tekton result file
+              echo "$escaped" > "$(results.extractedMirrorSet.path)"
           - name: create-cluster
             ref:
               resolver: git
@@ -371,6 +400,8 @@ spec:
                 value: "$(steps.get-latest-version-tag.results.version)"
               - name: instanceType
                 value: "$(tasks.pick-cluster-params.results.bundleArch)"
+              - name: imageContentSources
+                value: $(results.extractedMirrorSet)
     - name: deploy-operator
       runAfter:
         - provision-cluster
@@ -378,9 +409,6 @@ spec:
         - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
           operator: notin
           values: [""]
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       params:
         - name: eaasSpaceSecretRef
           value: $(tasks.provision-eaas-space.results.secretRef)
@@ -576,6 +604,8 @@ spec:
                   exit 1
               fi
 
+              FBC_FRAGMENT="quay.io/redhat-user-workloads/service-mesh-tenant/ossm-fbc-v4-17@sha256:541289fe86aeb3f2d84f57b37002e46b63fa5e8fe0705bcc9b9f2acdf871a70e"
+
               CS_NAMESTANZA="generateName: oo-"
 
               CS_MANIFEST=$(cat <<EOF
@@ -657,9 +687,9 @@ spec:
 
               echo "[$(date --utc +%FT%T.%3NZ)] Subscription name is \"$SUB\""
 
-              echo "[$(date --utc +%FT%T.%3NZ)] Waiting up to 5 minutes for installPlan to be created"
+              echo "[$(date --utc +%FT%T.%3NZ)] Waiting up to 10 minutes for installPlan to be created"
               FOUND_INSTALLPLAN=false
-              for _ in $(seq 1 60); do
+              for _ in $(seq 1 120); do
                 INSTALL_PLAN=$(oc -n "$INSTALL_NAMESPACE" get subscription "$SUB" -o jsonpath='{.status.installplan.name}' || true)
 
                 if [[ -n "$INSTALL_PLAN" ]]; then
@@ -782,7 +812,7 @@ spec:
               - name: workdir-path
                 value: /workspace
               - name: oci-ref
-                value: $(params.OCI_REF):$(tasks.parse-metadata.results.source-git-revision)
+                value: $(params.OCI_REF):$(tasks.parse-metadata.results.source-git-revision)-$(context.taskRun.uid)
               - name: credentials-volume-name
                 value: oci-auth
           - name: fail-if-any-step-failed
