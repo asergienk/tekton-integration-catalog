@@ -80,10 +80,6 @@ spec:
     - name: provision-eaas-space
       runAfter:
         - parse-metadata
-      when:
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       taskRef:
         resolver: git
         params:
@@ -98,33 +94,23 @@ spec:
           value: $(context.pipelineRun.name)
         - name: ownerUid
           value: $(context.pipelineRun.uid)
-    - name: fetch-image-mirror-set
+    - name: fetch-config-files
       runAfter:
         - provision-eaas-space
-      when:
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       taskSpec:
         results:
           - name: mirrorSetYaml
             description: "Contents of the image mirror set yaml file"
           - name: serializedMirrorSetYaml
             description: "A serialized string of an ImageDigestMirrorSet YAML, where each mirror entry is formatted with escaped newlines to preserve structure in a single-line format"
+          - name: scorecardConfigImages
+            description: "Images pulled from the scorecard config YAML."
         steps:
-          - name: retrieve-mirror-yaml
+          - name: retrieve-auth-header
             image: quay.io/konflux-ci/konflux-test:v1.4.26@sha256:124643eeaa77684dea6270eada4553ebd7d63fcc06ff0c57f4a7d43695507bb5
-            computeResources:
-              limits:
-                memory: 512Mi
-              requests:
-                memory: 512Mi
-                cpu: 100m
             env:
               - name: SOURCE_GIT_URL
                 value: "$(tasks.parse-metadata.results.source-git-url)"
-              - name: SOURCE_GIT_REVISION
-                value: "$(tasks.parse-metadata.results.source-git-revision)"
               - name: REPO_TOKEN
                 value: $(params.REPO_TOKEN)
               - name: REPO_KEY
@@ -133,8 +119,8 @@ spec:
               #!/usr/bin/env bash
               set -euo pipefail
               . /utils.sh
-              
-              mirror_set_url="${SOURCE_GIT_URL}/raw/${SOURCE_GIT_REVISION}/.tekton/images-mirror-set.yaml"
+
+              AUTH_HEADER=""
               
               # If REPO_TOKEN and REPO_KEY are defined, assume the source code repo is private and requires a token
               if [[ -n "${REPO_TOKEN}" && -n "${REPO_KEY}" ]]; then
@@ -156,9 +142,37 @@ spec:
                   echo "Unknown Git provider. Cannot determine proper authorization header."
                   exit 1
                 fi
+              fi
 
-                # Fetch the file
-                mirror_set_yaml=$(curl -kfL -H "$AUTH_HEADER" "$mirror_set_url")
+              echo "$AUTH_HEADER" > /tmp/auth_header.txt
+          - name: fetch-config-files
+            image: quay.io/konflux-ci/konflux-test:v1.4.26@sha256:124643eeaa77684dea6270eada4553ebd7d63fcc06ff0c57f4a7d43695507bb5
+            computeResources:
+              limits:
+                memory: 512Mi
+              requests:
+                memory: 512Mi
+                cpu: 100m
+            env:
+              - name: SOURCE_GIT_URL
+                value: "$(tasks.parse-metadata.results.source-git-url)"
+              - name: SOURCE_GIT_REVISION
+                value: "$(tasks.parse-metadata.results.source-git-revision)"
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              . /utils.sh
+
+              auth_header=""
+              if [[ -s "/tmp/auth_header.txt" ]]; then
+                auth_header=$(cat /tmp/auth_header.txt)
+              fi
+              
+              # Fetch image mirror set
+              mirror_set_url="${SOURCE_GIT_URL}/raw/${SOURCE_GIT_REVISION}/.tekton/images-mirror-set.yaml"
+
+              if [[ -n "$auth_header" ]]; then
+                mirror_set_yaml=$(curl -kfL -H "$auth_header" "$mirror_set_url")
               else
                 mirror_set_yaml=$(curl -kfL "$mirror_set_url")
               fi
@@ -176,13 +190,63 @@ spec:
               echo "Serialized image mirror set: $serialized_mirror_set"
 
               echo -e "$serialized_mirror_set" > "$(results.serializedMirrorSetYaml.path)"
+
+              # Fetch scorecard config
+              #scorecard_config_url="${SOURCE_GIT_URL}/raw/${SOURCE_GIT_REVISION}/bundle/tests/scorecard/config.yaml"
+              scorecard_config_url="https://raw.githubusercontent.com/red-hat-data-services/RHOAI-Build-Config/refs/heads/rhoai-2.21/bundle/tests/scorecard/config.yaml"
+              if [[ -n "$auth_header" ]]; then
+                scorecard_config_yaml=$(curl -kfL -H "$auth_header" "$scorecard_config_url") || true
+              else
+                scorecard_config_yaml=$(curl -kfL "$scorecard_config_url") || true
+              fi
+
+              collect_scorecard_config_images() {
+                local yaml_input="$1"
+                local images=()
+
+                local stage_count
+                stage_count=$(echo "$yaml_input" | yq -r '.stages | length' 2>/dev/null)
+
+                # Return early if no stages key or empty
+                if [[ -z "$stage_count" || "$stage_count" == "null" || "$stage_count" -eq 0 ]]; then
+                  return 0
+                fi
+
+                for (( i=0; i<stage_count; i++ )); do
+                  local test_count
+                  test_count=$(echo "$yaml_input" | yq -r ".stages[$i].tests | length" 2>/dev/null)
+
+                  if [[ -z "$test_count" || "$test_count" == "null" || "$test_count" -eq 0 ]]; then
+                    continue
+                  fi
+
+                  for (( j=0; j<test_count; j++ )); do
+                    local image
+                    image=$(echo "$yaml_input" | yq -r ".stages[$i].tests[$j].image")
+
+                    if [[ -n "$image" && "$image" != "null" ]]; then
+                      images+=("$image")
+                    fi
+                  done
+                done
+
+                if (( ${#images[@]} > 0 )); then
+                  printf "%s\n" "${images[@]}" | sort -u
+                fi
+              }
+
+              if [[ -z "$scorecard_config_yaml" ]]; then
+                echo "Scorecard config not found at $scorecard_config_url – skipping scorecard images retrieval."
+                scorecard_config_images=""
+              else
+                echo "Successfully fetched scorecard config"
+                scorecard_config_images=$(collect_scorecard_config_images "${scorecard_config_yaml}")
+                echo "Scorecard config images: $scorecard_config_images"
+              fi
+              echo -e "$scorecard_config_images" > "$(results.scorecardConfigImages.path)"
     - name: get-unreleased-bundle
       runAfter:
-        - fetch-image-mirror-set
-      when:
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
+        - fetch-config-files
       taskSpec:
         results:
           - name: unreleasedBundle
@@ -203,9 +267,9 @@ spec:
               resolver: git
               params:
                 - name: url
-                  value: https://github.com/konflux-ci/tekton-integration-catalog.git
+                  value: https://github.com/asergienk/tekton-integration-catalog.git
                 - name: revision
-                  value: main
+                  value: add_image_source_check
                 - name: pathInRepo
                   value: stepactions/bundles/get-unreleased-bundle/0.1/get-unreleased-bundle.yaml
             params:
@@ -227,7 +291,7 @@ spec:
               - name: BUNDLE_IMAGE
                 value: "$(steps.get-unreleased-bundle.results.unreleasedBundle)"
               - name: MIRROR_SET_YAML
-                value: "$(tasks.fetch-image-mirror-set.results.mirrorSetYaml)"
+                value: "$(tasks.fetch-config-files.results.mirrorSetYaml)"
             script: |
               #!/usr/bin/env bash
               set -euo pipefail
@@ -306,9 +370,6 @@ spec:
         - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
           operator: notin
           values: [""]
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       taskSpec:
         results:
           - name: ocpVersion
@@ -370,9 +431,6 @@ spec:
         - input: "$(tasks.pick-cluster-params.results.bundleArch)"
           operator: notin
           values: [""]
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       taskSpec:
         results:
           - name: clusterName
@@ -409,7 +467,7 @@ spec:
               - name: instanceType
                 value: "$(tasks.pick-cluster-params.results.bundleArch)"
               - name: imageContentSources
-                value: "$(tasks.fetch-image-mirror-set.results.serializedMirrorSetYaml)"
+                value: "$(tasks.fetch-config-files.results.serializedMirrorSetYaml)"
     - name: deploy-operator
       runAfter:
         - provision-cluster
@@ -417,9 +475,6 @@ spec:
         - input: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
           operator: notin
           values: [""]
-        - input: $(tasks.parse-metadata.results.test-event-type)
-          operator: in
-          values: [ "push", "Push" ]
       params:
         - name: eaasSpaceSecretRef
           value: $(tasks.provision-eaas-space.results.secretRef)
@@ -434,6 +489,9 @@ spec:
         - name: channelName
           value: "$(tasks.get-unreleased-bundle.results.channelName)"
       taskSpec:
+        results:
+          - name: imagesPulledAfterDeploymentStart
+            description: "Images pulled to the cluster after the deployment start time"
         params:
           - name: eaasSpaceSecretRef
             type: string
@@ -475,7 +533,7 @@ spec:
             # In case the test fails, we don't want to fail the TaskRun immediately,
             # because we want to proceed with archiving the artifacts in a following step.
             onError: continue
-            image: quay.io/konflux-ci/konflux-test:v1.4.25@sha256:78f5fd149f6fcd1e8ab8c7227cfb82c1be2eba0bbda49f033b5d82e9154414b2
+            image: quay.io/konflux-ci/konflux-test:v1.4.29@sha256:3619ffde751d337d02f1f61c83c5c39eb87d8091dbe5a9af58ea98577fa09461
             computeResources:
               limits:
                 memory: 4Gi
@@ -606,6 +664,8 @@ spec:
 
               echo "[$(date --utc +%FT%T.%3NZ)] OperatorGroup name is \"$OPERATORGROUP\""
 
+              FBC_FRAGMENT="quay.io/redhat-user-workloads/service-mesh-tenant/ossm-fbc-v4-17@sha256:541289fe86aeb3f2d84f57b37002e46b63fa5e8fe0705bcc9b9f2acdf871a70e"
+
               # Update the image digest with the 0th manifest digest
               if updated_fbc_image=$(resolve_to_0th_manifest_digest "$FBC_FRAGMENT"); then
                   echo "Updating FBC fragment image from $FBC_FRAGMENT to $updated_fbc_image"
@@ -663,7 +723,8 @@ spec:
                 exit 1
               fi
 
-              echo "[$(date --utc +%FT%T.%3NZ)] Set the deployment start time"
+              DEPLOYMENT_START_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+              echo "[$(date --utc +%FT%T.%3NZ)] Set the deployment start time: ${DEPLOYMENT_START_TIME}"
 
               SUB_NAMESTANZA="generateName: oo-"
 
@@ -719,6 +780,16 @@ spec:
                     if [[ "$(oc -n "$INSTALL_NAMESPACE" get csv "$CSV" -o jsonpath='{.status.phase}')" == "Succeeded" ]]; then
                       echo "[$(date --utc +%FT%T.%3NZ)] ClusterServiceVersion \"$CSV\" ready"
                       echo "[$(date --utc +%FT%T.%3NZ)] Script Completed Execution Successfully !"
+
+                      IMAGE_PULL_EVENTS="$ARTIFACT_DIR/image_pull_events.txt"
+                      echo "[$(date --utc +%FT%T.%3NZ)] Dumping cluster image pull events as $IMAGE_PULL_EVENTS"
+                      oc get events --all-namespaces --field-selector reason==Pulling -o go-template='{{range .items}}{{.lastTimestamp}},{{.message}}{{"\n"}}{{end}}' >"$IMAGE_PULL_EVENTS"
+                      
+                      images_pulled_after_deployment_start=$(parse_collected_image_pulls "$IMAGE_PULL_EVENTS" "$DEPLOYMENT_START_TIME")
+                      echo -e "Images pulled after deployment start: $images_pulled_after_deployment_start"
+
+                      echo "$images_pulled_after_deployment_start" > "$(results.imagesPulledAfterDeploymentStart.path)"
+
                       exit 0
                     fi
                   fi
@@ -834,3 +905,46 @@ spec:
                   value: main
                 - name: pathInRepo
                   value: stepactions/fail-if-any-step-failed/0.1/fail-if-any-step-failed.yaml
+    - name: verify-image-sources
+      runAfter:
+        - deploy-operator
+      params:
+        - name: imagesPulledAfterDeploymentStart
+          value: "$(tasks.deploy-operator.results.imagesPulledAfterDeploymentStart)"
+        - name: bundleImage
+          value: "$(tasks.get-unreleased-bundle.results.unreleasedBundle)"
+        - name: scorecardConfigImages
+          value: "$(tasks.fetch-config-files.results.scorecardConfigImages)"
+      taskSpec:
+        params:
+          - name: imagesPulledAfterDeploymentStart
+            type: string
+          - name: bundleImage
+            type: string
+          - name: scorecardConfigImages
+            type: string
+        steps:
+          - name: verify-images
+            image: quay.io/konflux-ci/konflux-test:v1.4.26@sha256:124643eeaa77684dea6270eada4553ebd7d63fcc06ff0c57f4a7d43695507bb5
+            computeResources:
+              limits:
+                memory: 512Mi
+              requests:
+                memory: 512Mi
+                cpu: 100m
+            env:
+              - name: PULLED_IMAGES
+                value: $(params.imagesPulledAfterDeploymentStart)
+              - name: BUNDLE_IMAGE
+                value: $(params.bundleImage)
+              - name: SCORECARD_CONFIG_IMAGES
+                value: $(params.scorecardConfigImages)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              . /utils.sh
+
+              # don't forget to add code to get manifest digest
+              # make a task out of it??
+
+              echo "hello"
