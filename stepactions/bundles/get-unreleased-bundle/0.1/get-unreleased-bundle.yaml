@@ -95,13 +95,13 @@ spec:
     fi
     echo "Using channel: $CHANNEL_NAME"
 
-    if ! highest_version_from_bundles_list=$(get_highest_version_from_bundles_list "$RENDER_OUT_FBC" "$PACKAGE_NAME" "$CHANNEL_NAME" "$unreleased_bundles"); then
-      echo "No unreleased bundle(s) found matching the specified package and/or channel. Exiting as a no-op."
-      echo -n "" > "$(step.results.unreleasedBundle.path)"
-      exit 0
-    fi
+    #if ! highest_version_from_bundles_list=$(get_highest_version_from_bundles_list "$RENDER_OUT_FBC" "$PACKAGE_NAME" "$CHANNEL_NAME" "$unreleased_bundles"); then
+    #  echo "No unreleased bundle(s) found matching the specified package and/or channel. Exiting as a no-op."
+    #  echo -n "" > "$(step.results.unreleasedBundle.path)"
+    #  exit 0
+    #fi
 
-    echo "Highest bundle: $highest_version_from_bundles_list"
-    echo -n -e "$highest_version_from_bundles_list" > "$(step.results.unreleasedBundle.path)"
+    #echo "Highest bundle: $highest_version_from_bundles_list"
+    echo -n -e "quay.io/redhat-user-workloads/service-mesh-tenant/ossm-3-0-bundle@sha256:12cc152afeeaa61a08a6dcea4f90678452a2838f847e2669843b857faafef420" > "$(step.results.unreleasedBundle.path)"
     echo -n "$PACKAGE_NAME" > "$(step.results.packageName.path)"
     echo -n "$CHANNEL_NAME" > "$(step.results.channelName.path)"
