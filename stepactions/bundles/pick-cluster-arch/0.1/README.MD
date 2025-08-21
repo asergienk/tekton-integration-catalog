@@ -2,7 +2,6 @@
 
 This StepAction retrieves the supported architectures for a bundle by checking the "operatorframework.io/arch" labels on the bundle CSV.
 If arm64 is supported, the StepAction returns "m6g.large" instance type; otherwise, it returns "m5.large".
-If neither arm64 nor amd64 are supported, the step exits with an error.
 
 ## Parameters
 |name|description|default value|required|
